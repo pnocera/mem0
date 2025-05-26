@@ -1,104 +1,202 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
+	"time"
 
-	"mem0/graphs" // Assuming module name is 'mem0' as per go.mod
-	"mem0/vectorstores"
+	"mem0/graphs"       // Assuming module name is 'mem0'
+	"mem0/memory"       // Main memory package
+	"mem0/vectorstores" // For nested config
 )
 
+// Mock NATSClient for example usage
+type mockNATSClient struct{}
+
+func (m *mockNATSClient) Publish(ctx context.Context, topic string, data []byte) error {
+	fmt.Printf("MOCK_NATS_PUBLISH: Topic=%s, Data=%s\n", topic, string(data))
+	return nil
+}
+
+func (m *mockNATSClient) Request(ctx context.Context, topic string, data []byte, timeout time.Duration) ([]byte, error) {
+	fmt.Printf("MOCK_NATS_REQUEST: Topic=%s, Data=%s\n", topic, string(data))
+	// For Search and Get, the shell service expects an error to indicate "not fully implemented"
+	// For this example, we'll return a generic error for Request.
+	// A more sophisticated mock might return specific JSON based on the topic.
+	// The actual topic names will come from the memCfg passed to the service.
+	if topic == "mem0.memory.search" { // Example topic, replace with actual from memCfg if needed for specific mock logic
+		return []byte("[]"), fmt.Errorf("mockNATSClient: Search via NATS not fully implemented (response handling pending)")
+	}
+	if topic == "mem0.memory.get" { // Example topic
+		return nil, fmt.Errorf("mockNATSClient: Get via NATS not fully implemented (response handling pending)")
+	}
+	return nil, fmt.Errorf("mockNATSClient: Request not fully implemented for topic %s", topic)
+}
+
+func (m *mockNATSClient) Subscribe(ctx context.Context, topic string, handler func(msg []byte)) error {
+	fmt.Printf("MOCK_NATS_SUBSCRIBE: Topic=%s\n", topic)
+	// In a real mock for testing workers, you might launch a goroutine to send mock messages to the handler.
+	// For this example, doing nothing is fine as service methods don't use Subscribe directly.
+	return nil
+}
+
 func main() {
-	fmt.Println("--- Graphs Package Example ---")
+	fmt.Println("--- Memory Package Integration Example ---")
 
-	// 1. GraphStoreConfig Unmarshalling
-	graphConfigJSON := `{
-		"provider": "neo4j",
-		"config": {
-			"url": "bolt://localhost:7687",
-			"username": "neo4j",
-			"password": "password",
-			"database": "neo4j",
-			"base_label": true
+	// 1. memory.Config Unmarshalling and Validation
+	memoryConfigJSON := `{
+		"nats_address": "nats://localhost:4222",
+		"openai_api_key": "sk-examplekey",
+		"topic_memory_add_received": "mem0.memory.add.received",
+		"topic_memory_process": "mem0.memory.process",
+		"topic_memory_embed": "mem0.memory.embed",
+		"topic_memory_vector_store_add": "mem0.memory.vectorstore.add",
+		"topic_memory_graph_store_add": "mem0.memory.graphstore.add",
+		"topic_memory_history_log": "mem0.memory.history.log",
+		"topic_memory_search": "mem0.memory.search",
+		"topic_memory_get": "mem0.memory.get",
+		"topic_memory_update": "mem0.memory.update",
+		"topic_memory_delete": "mem0.memory.delete",
+		"enable_graph_store": true,
+		"enable_infer": true,
+		"graph_config": {
+			"provider": "neo4j",
+			"config": {
+				"url": "bolt://graphdb:7687",
+				"username": "neo4j",
+				"password": "graphpassword",
+				"database": "mem0graph",
+				"base_label": false
+			},
+			"custom_prompt": "graph custom prompt for example"
 		},
-		"custom_prompt": "custom graph prompt"
+		"vector_store_config": {
+			"provider": "qdrant",
+			"config": {
+				"address": "http://qdrant:6333",
+				"collection_name": "mem0vectors"
+			}
+		},
+		"custom_fact_extraction_prompt": "example custom fact extraction",
+		"custom_update_memory_prompt": "example custom update memory"
 	}`
-	var graphCfg graphs.GraphStoreConfig
-	err := json.Unmarshal([]byte(graphConfigJSON), &graphCfg)
+
+	var memCfg memory.Config
+	err := json.Unmarshal([]byte(memoryConfigJSON), &memCfg)
 	if err != nil {
-		log.Fatalf("Error unmarshalling GraphStoreConfig: %v", err)
-	}
-	fmt.Printf("GraphStoreConfig Provider: %s\n", graphCfg.Provider)
-	if neo4jConf, ok := graphCfg.Config.(*graphs.Neo4jConfig); ok {
-		fmt.Printf("Neo4j URL: %s, BaseLabel: %t\n", neo4jConf.URL, neo4jConf.BaseLabel)
-	} else {
-		fmt.Println("Could not assert graphCfg.Config to *graphs.Neo4jConfig")
-	}
-	fmt.Printf("Custom Graph Prompt: %s\n", graphCfg.CustomPrompt)
-
-	// Validate the unmarshalled config
-	err = graphCfg.Validate()
-	if err != nil {
-		fmt.Printf("GraphStoreConfig validation error: %v\n", err)
-	} else {
-		fmt.Println("GraphStoreConfig validated successfully.")
+		log.Fatalf("Error unmarshalling memory.Config: %v", err)
 	}
 
-	// 2. Accessing an exported tool definition
-	fmt.Printf("AddMemoryToolGraph Name: %s\n", graphs.AddMemoryToolGraph.Function.Name)
-	fmt.Printf("AddMemoryToolGraph Description: %s\n", graphs.AddMemoryToolGraph.Function.Description)
+	fmt.Printf("\n--- Parsed memory.Config ---\n")
+	fmt.Printf("NATS Address: %s\n", memCfg.NATSAddress)
+	fmt.Printf("EnableGraphStore: %t\n", memCfg.EnableGraphStore)
 
-	// 3. Calling GetDeleteMessages
-	systemMsg, userMsg := graphs.GetDeleteMessages("graph_mem1, graph_mem2", "delete graph_mem1", "user123")
-	fmt.Printf("GetDeleteMessages System: %s\n", systemMsg)
-	fmt.Printf("GetDeleteMessages User: %s\n", userMsg)
-
-	fmt.Println("\n--- Vectorstores Package Example ---")
-
-	// 1. VectorStoreConfig Unmarshalling
-	vectorConfigJSON := `{
-		"provider": "qdrant",
-		"config": {
-			"address": "http://localhost:6333",
-			"api_key": "some_api_key",
-			"collection_name": "my_vectors"
+	if memCfg.GraphConfig != nil {
+		fmt.Printf("GraphConfig Provider: %s\n", memCfg.GraphConfig.Provider)
+		if neo4jConf, ok := memCfg.GraphConfig.Config.(*graphs.Neo4jConfig); ok {
+			fmt.Printf("  Neo4j URL: %s, Database: %s\n", neo4jConf.URL, neo4jConf.Database)
+		} else {
+			fmt.Printf("  Could not assert GraphConfig.Config to *graphs.Neo4jConfig (Type: %T)\n", memCfg.GraphConfig.Config)
 		}
-	}`
-	var vectorCfg vectorstores.VectorStoreConfig
-	err = json.Unmarshal([]byte(vectorConfigJSON), &vectorCfg)
-	if err != nil {
-		log.Fatalf("Error unmarshalling VectorStoreConfig: %v", err)
-	}
-	fmt.Printf("VectorStoreConfig Provider: %s\n", vectorCfg.Provider)
-	if qdrantConf, ok := vectorCfg.Config.(*vectorstores.QdrantConfig); ok {
-		fmt.Printf("Qdrant Address: %s, Collection: %s\n", qdrantConf.Address, qdrantConf.CollectionName)
 	} else {
-		fmt.Println("Could not assert vectorCfg.Config to *vectorstores.QdrantConfig")
+		fmt.Println("GraphConfig is nil")
 	}
 
-	// Validate the unmarshalled config
-	err = vectorCfg.Validate()
-	if err != nil {
-		fmt.Printf("VectorStoreConfig validation error: %v\n", err)
+	if memCfg.VectorStoreConfig != nil {
+		fmt.Printf("VectorStoreConfig Provider: %s\n", memCfg.VectorStoreConfig.Provider)
+		if qdrantConf, ok := memCfg.VectorStoreConfig.Config.(*vectorstores.QdrantConfig); ok {
+			fmt.Printf("  Qdrant Address: %s, Collection: %s\n", qdrantConf.Address, qdrantConf.CollectionName)
+		} else {
+			fmt.Printf("  Could not assert VectorStoreConfig.Config to *vectorstores.QdrantConfig (Type: %T)\n", memCfg.VectorStoreConfig.Config)
+		}
 	} else {
-		fmt.Println("VectorStoreConfig validated successfully.")
+		fmt.Println("VectorStoreConfig is nil")
 	}
 
-	// 2. Instantiate QdrantStore and call a method
-	qStore := vectorstores.QdrantStore{}
-	collections, err := qStore.ListCollections()
+	fmt.Printf("\nValidating memory.Config...\n")
+	err = memCfg.Validate()
 	if err != nil {
-		fmt.Printf("QdrantStore.ListCollections() error: %v\n", err)
+		fmt.Printf("memory.Config validation error: %v\n", err)
 	} else {
-		fmt.Printf("QdrantStore.ListCollections() result: %v\n", collections)
+		fmt.Println("memory.Config validated successfully.")
 	}
 
-	// Example of using another method
-	searchResult, err := qStore.GetVector("test_collection", "vector_id_1")
+	// 2. Instantiate HistoryStore and MemoryService
+	fmt.Printf("\n--- MemoryService Operations ---\n")
+	historyStore, err := memory.NewSQLiteHistoryStore(":memory:") // Use in-memory for example
 	if err != nil {
-		fmt.Printf("QdrantStore.GetVector() error: %v\n", err)
+		log.Fatalf("Error creating SQLiteHistoryStore: %v", err)
+	}
+	defer historyStore.Close()
+
+	mockNatsClient := &mockNATSClient{}
+	memoryService := memory.NewMemoryService(mockNatsClient, &memCfg, historyStore)
+
+	// 3. Add Memory
+	addReq := memory.AddMemoryRequest{
+		BaseRequestInfo: memory.BaseRequestInfo{UserID: "example-user-123", AgentID: "example-agent-007"},
+		Messages: []memory.Message{
+			{Role: "user", Content: "Hello, this is a test memory."},
+			{Role: "assistant", Content: "I acknowledge this test memory."},
+		},
+		Infer: true,
+	}
+	fmt.Printf("\nValidating AddMemoryRequest...\n")
+	if err := addReq.Validate(); err != nil { // Assuming Validate method exists
+		fmt.Printf("AddMemoryRequest validation error: %v\n", err)
 	} else {
-		fmt.Printf("QdrantStore.GetVector() result: %v\n", searchResult)
+		fmt.Println("AddMemoryRequest validated successfully.")
+	}
+
+	fmt.Printf("Calling memoryService.Add...\n")
+	memoryID, err := memoryService.Add(context.Background(), &addReq)
+	if err != nil {
+		fmt.Printf("memoryService.Add error: %v\n", err)
+	} else {
+		fmt.Printf("memoryService.Add success, MemoryID: %s\n", memoryID)
+	}
+
+	// 4. Search Memory
+	searchReq := memory.SearchMemoryRequest{
+		BaseRequestInfo: memory.BaseRequestInfo{UserID: "example-user-123"},
+		Query:           "test memory",
+		Limit:           5,
+	}
+	fmt.Printf("\nValidating SearchMemoryRequest...\n")
+	if err := searchReq.Validate(); err != nil { // Assuming Validate method exists
+		fmt.Printf("SearchMemoryRequest validation error: %v\n", err)
+	} else {
+		fmt.Println("SearchMemoryRequest validated successfully.")
+	}
+
+	fmt.Printf("Calling memoryService.Search...\n")
+	searchResults, err := memoryService.Search(context.Background(), &searchReq)
+	if err != nil {
+		fmt.Printf("memoryService.Search error: %v\n", err) // Expected from shell service
+	}
+	fmt.Printf("memoryService.Search results (shell): %+v\n", searchResults)
+
+	// 5. Get History
+	fmt.Printf("\nCalling memoryService.GetHistory for dummy ID 'test-history-id'...\n")
+	// Use the actual memoryID from the Add operation if successful for a more meaningful history
+	historyIDToFetch := "test-history-id"
+	if memoryID != "" {
+		historyIDToFetch = memoryID
+		fmt.Printf("(Using actual memoryID from Add: %s)\n", memoryID)
+	}
+
+	historyEvents, err := memoryService.GetHistory(context.Background(), historyIDToFetch, memory.BaseRequestInfo{UserID: "example-user-123"})
+	if err != nil {
+		fmt.Printf("memoryService.GetHistory error: %v\n", err)
+	} else {
+		fmt.Printf("memoryService.GetHistory success. Found %d events.\n", len(historyEvents))
+		for i, event := range historyEvents {
+			fmt.Printf("  Event %d: ID=%s, Type=%s, Timestamp=%s\n", i+1, event.EventID, event.EventType, event.Timestamp)
+		}
+		if len(historyEvents) == 0 && historyIDToFetch == memoryID {
+			fmt.Println("  (Note: History is empty for the added memory because workers are not actually running to log events like MEMORY_PROCESSED etc.)")
+		}
 	}
 }
